@@ -1,0 +1,55 @@
+# --- Compiled Binaries & Libraries ---
+*.exe
+*.out
+*.app
+*.so
+*.dll
+*.lib
+*.exp
+*.pdb
+*.node
+
+# --- CUDA Object Files & Intermediate Build Products ---
+*.o
+*.obj
+*.cu.o
+*.d
+*.ptx
+*.cubin
+*.fatbin
+*.optix
+# Blackwell specific JIT cache
+/ComputeCache/
+
+# --- CMake / Build Folders ---
+# We ignore the entire build directory where CMake generates Makefiles/Solutions
+build/
+out/
+/bin/
+/lib/
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+Makefile
+*.sln
+*.vcxproj
+*.filters
+*.user
+
+# --- VS Code / IDE Specifics ---
+.vscode/
+.vs/
+.idea/
+*.swp
+*.swo
+
+# --- System & OS Files ---
+.DS_Store
+Thumbs.db
+
+# --- Large Data / Logs ---
+*.log
+*.csv
+/data/
+/results/
