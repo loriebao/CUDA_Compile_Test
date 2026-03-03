@@ -1,47 +1,6 @@
-#include <cuda_runtime.h>
-#include <stdio.h>
-#include <iostream>
-#include <cublas_v2.h>
+#include "HelloWorld.h"
 
-__device__ constexpr int MM_BLOCK_SIZE = 16;
-__device__ constexpr int MM_GRID_SIZE = 4;
 
-__device__ constexpr int ELEM_PER_THREAD = 4;
-__device__ constexpr int STRIDE = MM_BLOCK_SIZE / ELEM_PER_THREAD;
-
-#define CUDA_KERNEL_CHECK			if( cudaDeviceSynchronize() != cudaSuccess ) {\
-                                    printf("\n%s (%d): [CUDA KERNEL FAILED]\nCudaErr = %s\n",\
-                                    __FILE__,__LINE__,cudaGetErrorString (cudaGetLastError())); \
-									exit(-1); }
-
-#define CUDA_CALL_FL(A,F,L)			do { if( (A) != cudaSuccess ) { \
-                                    cudaDeviceSynchronize(); \
-                                    printf("\n%s (%d): %s [CUDA CALL FAILED]\nCudaErr = %s\n",\
-                                    F,L,#A,cudaGetErrorString (cudaGetLastError())); \
-                                    exit(-1); } } while (0)
-#define CUDA_CALL(A)				CUDA_CALL_FL(A,__FILE__,__LINE__)
-
-// for cudnn
-#define CUDNN_CALL_FL(A,F,L)        do { cudnnStatus_t status; \
-                                    if ( (status = A) != CUDNN_STATUS_SUCCESS) {\
-                                    printf("\n%s (%d): %s [CUDNN CALL FAILED]\nCudaErr = %s\n",\
-                                    F,L,#A,cudnnGetErrorString(status)); \
-                                    exit(-1); } \
-                                    } while (0)
-
-#define CUDNN_CALL(A)               CUDNN_CALL_FL(A,__FILE__,__LINE__)
-
-#define CUBLAS_CALL_FL(A,F,L)        do { cublasStatus_t status = (A); \
-                                    if (status != CUBLAS_STATUS_SUCCESS) {\
-                                    printf("\n%s (%d): %s [CUBLAS CALL FAILED]\nError String: %s\n",\
-                                    F, L, #A, cublasGetStatusString(status)); \
-                                    exit(-1); } \
-                                    } while (0)
-
-#define CUBLAS_CALL(A)               CUBLAS_CALL_FL(A,__FILE__,__LINE__)
-
-typedef void * cuBlasHandle;
-cuBlasHandle InitCuBlas(bool useTensorCore);
 
 cuBlasHandle InitCuBlas(bool useTensorCore)
 {
@@ -57,26 +16,6 @@ cuBlasHandle InitCuBlas(bool useTensorCore)
     
     return (cuBlasHandle)handle;
 }
-
-// A is 2D matrix: col_a x row_a, dimA = { col_a x row_a x 1 }
-// B is 3D tensor: col_b x row_b x depth_b, dimB = { col_b x row_b x depth_b }
-// common dimension: col_a = row_b when both are not transposed -> not checked
-// C = A * B -> dimC = { col_b x row_a x depth_b }
-// A and B are Row major, cuBlas is Col major, we will perform B * A instead
-// int3 is used as { Col, Row, Depth }
-void BatchMatMul(const float * A, const int3 &dimA, bool transA,
-                 const float * B, const int3 &dimB, bool transB,
-                 float * C, cuBlasHandle cuBlasHandle);
-
-// op = A x B
-void gpuBatchMatMul(const float * ip, const int3 & ipSize, // A
-                    const float * kernel, const int3 & kerSize, // B
-                    float * op, cudaStream_t stream = 0);
-
-// op = A x B
-void gpuBatchMatMulScatter(const float * kernel, const int3 & kerSize, // A
-                           const float * ip, const int3 & ipSize, // B
-                           float * op, cudaStream_t stream);
 
 // Batch matrix multiplication kernel
 // matrix description is Width x Height -> NumCol x NumRow, not regular math notations of NumRow x NumCol
@@ -162,24 +101,6 @@ void gpuMatlMul(float * d_output, const float * d_input, const int & input_size,
 
     batchMatMulKernel<<< grid_size, thread_size, 0, stream >>>( d_input, d_kernel, d_output, M, N, K);
     CUDA_KERNEL_CHECK;
-}
-
-// Kernel using Dynamic Shared Memory
-__global__ void high_memory_kernel(float* output) {
-    // 'extern' indicates the size is defined at launch time
-    extern __shared__ float shared_data[];
-
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    printf("high_memory_kernel from GPU thread %d!\n", tid);
-
-    // Use the shared memory (e.g., as an 16,384 element float array = 64 KB)
-    shared_data[tid] = (float)tid;
-    
-    __syncthreads();
-
-    if (tid == 0) {
-        output[0] = shared_data[16000]; // Accessing data beyond the 48KB (12k float) mark
-    }
 }
 
 void BatchMatMul(const float * A, const int3 & dimA, bool transA,
@@ -457,13 +378,32 @@ void gpuBatchMatMul(const float * ip, const int3 & ipSize, // A
     CUDA_KERNEL_CHECK;
 }
 
+// Kernel using Dynamic Shared Memory
+__global__ void high_memory_kernel(float* output, int output_size, int share_mem__size) {
+    // 'extern' indicates the size is defined at launch time
+    extern __shared__ float shared_data[];
+
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Use the shared memory (e.g., as an 16,384 element float array = 64 KB)
+    shared_data[tid] = (float)tid;
+    
+    __syncthreads();
+
+    //if (tid == 16) 
+        output[0] = shared_data[tid]; // Accessing data beyond the 48KB (12k float) mark
+    
+    printf("high_memory_kernel from GPU thread %d: output[0] %f, output_size %d, share_mem__size %dKB!\n", 
+            tid, output[0], output_size, share_mem__size/1024);
+}
+
 int main() {
     int device = 0;
     int kb_per_block = 64;
 
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, device);
-    kb_per_block = prop.sharedMemPerBlockOptin/1024; // Convert bytes to KB
+    
 
     // Check if the hardware actually supports more than 48 KB
     if (prop.sharedMemPerBlockOptin < 65536) {
@@ -472,14 +412,15 @@ int main() {
     }
     else
     {
-        printf("Device supports %dKB shared memory per block.\n", kb_per_block);
+        kb_per_block = prop.sharedMemPerBlockOptin/1024;
+        printf("Device supports %dKB shared memory per block.\n", (int)prop.sharedMemPerBlockOptin/1024);
     }
         
 
     float *d_out;
     cudaMalloc(&d_out, sizeof(float));
 
-    size_t shared_mem_size = kb_per_block * 1024;
+    size_t shared_mem_size = 48 * 1024;  //kb_per_block * 1024;
 
     // IMPORTANT: You must opt-in to use more than 48 KB
     // This attribute is what allows Blackwell/Ada to use their full L1 capacity
@@ -488,7 +429,7 @@ int main() {
                          shared_mem_size);
 
     // Launch with 64 KB specified in the 3rd execution configuration parameter
-    high_memory_kernel<<<MM_GRID_SIZE, MM_BLOCK_SIZE, shared_mem_size>>>(d_out);
+    high_memory_kernel<<<MM_GRID_SIZE, MM_BLOCK_SIZE, shared_mem_size>>>(d_out, (int)sizeof(float), (int)shared_mem_size);
 
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
