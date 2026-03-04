@@ -3,7 +3,7 @@
 #include <iostream>
 #include <cublas_v2.h>
 
-#include <cuda_runtime_api.h>
+//#include <cuda_runtime_api.h>
 
 // #ifdef __cplusplus
 //   extern "C" {
