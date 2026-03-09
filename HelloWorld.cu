@@ -397,6 +397,158 @@ __global__ void high_memory_kernel(float* output, int output_size, int share_mem
             tid, output[0], output_size, share_mem__size/1024);
 }
 
+#if 0
+int main() {
+    const int M = 8192, K = 4096, N = 4096;
+    const int num_streams = 4;
+    const int rows_per_stream = M / num_streams;
+
+    // 1. Allocate Pinned Host Memory (Page-locked)
+    float *h_A, *h_B, *h_C;
+    CUDA_KERNEL_CHECK(cudaHostAlloc(&h_A, M * K * sizeof(float), cudaHostAllocDefault));
+    CUDA_KERNEL_CHECK(cudaHostAlloc(&h_B, K * N * sizeof(float), cudaHostAllocDefault));
+    CUDA_KERNEL_CHECK(cudaHostAlloc(&h_C, M * N * sizeof(float), cudaHostAllocDefault));
+
+    // 2. Device Memory
+    float *d_A, *d_B, *d_C;
+    CUDA_KERNEL_CHECK(cudaMalloc(&d_A, M * K * sizeof(float)));
+    CUDA_KERNEL_CHECK(cudaMalloc(&d_B, K * N * sizeof(float)));
+    CUDA_KERNEL_CHECK(cudaMalloc(&d_C, M * N * sizeof(float)));
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    // 3. Create Streams and cuBLAS Handles
+    cudaStream_t streams[num_streams];
+    cublasHandle_t handles[num_streams];
+    for (int i = 0; i < num_streams; i++) {
+        cudaStreamCreate(&streams[i]);
+        cublasCreate(&handles[i]);
+        cublasSetStream(handles[i], streams[i]);
+    }
+
+    // Start Timing
+    cudaEventRecord(start);
+
+    // Pre-copy Matrix B (Common to all streams)
+    cudaMemcpyAsync(d_B, h_B, K * N * sizeof(float), cudaMemcpyHostToDevice, streams[0]);
+
+    float alpha = 1.0f, beta = 0.0f;
+
+    // 4. Overlap Loop
+    for (int i = 0; i < num_streams; i++) {
+        int a_offset = i * rows_per_stream * K;
+        int c_offset = i * rows_per_stream * N;
+
+        // Asynchronous H2D for a chunk of A
+        cudaMemcpyAsync(d_A + a_offset, h_A + a_offset, 
+                        rows_per_stream * K * sizeof(float), 
+                        cudaMemcpyHostToDevice, streams[i]);
+
+        // Compute: C_chunk = A_chunk * B
+        // Row-Major swap: C^T = B^T * A^T
+        cublasSgemm(handles[i], CUBLAS_OP_N, CUBLAS_OP_N,
+                    N, rows_per_stream, K,
+                    &alpha,
+                    d_B, N,
+                    d_A + a_offset, K,
+                    &beta,
+                    d_C + c_offset, N);
+
+        // Asynchronous D2H for the result chunk
+        cudaMemcpyAsync(h_C + c_offset, d_C + c_offset, 
+                        rows_per_stream * N * sizeof(float), 
+                        cudaMemcpyDeviceToHost, streams[i]);
+    }
+
+    // Synchronize all streams
+    for (int i = 0; i < num_streams; i++) cudaStreamSynchronize(streams[i]);
+
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+
+    // Calculate TFLOPS: (2 * M * N * K) / (time * 10^12)
+    double flops = 2.0 * M * N * K;
+    double tflops = (flops / (milliseconds / 1000.0)) / 1e12;
+
+    std::cout << std::fixed << std::setprecision(2);
+    std::cout << "Time elapsed: " << milliseconds << " ms" << std::endl;
+    std::cout << "Performance: " << tflops << " TFLOPS" << std::endl;
+
+    // Cleanup
+    for (int i = 0; i < num_streams; i++) {
+        cublasDestroy(handles[i]);
+        cudaStreamDestroy(streams[i]);
+    }
+    cudaFreeHost(h_A); cudaFreeHost(h_B); cudaFreeHost(h_C);
+    cudaFree(d_A); cudaFree(d_B); cudaFree(d_C);
+
+    return 0;
+}
+#endif
+
+#if 0
+int main() {
+    // Row major Matrix dimensions: C(m,n) = A(m,k) * B(k,n)
+    const int m = 2, k = 3, n = 2;
+    
+    // Host matrices (Row-Major)
+    float h_A[m * k] = {1, 2, 3,  
+                        4, 5, 6}; // 2x3
+    float h_B[k * n] = {7, 8, 
+                        9, 10, 
+                        11, 12};  // 3x2
+    float h_C[m * n] = {0};       // 2x2 result
+
+    float *d_A, *d_B, *d_C;
+    CUDA_KERNEL_CHECK(cudaMalloc(&d_A, m * k * sizeof(float)));
+    CUDA_KERNEL_CHECK(cudaMalloc(&d_B, k * n * sizeof(float)));
+    CUDA_KERNEL_CHECK(cudaMalloc(&d_C, m * n * sizeof(float)));
+
+    CUDA_KERNEL_CHECK(cudaMemcpy(d_A, h_A, m * k * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_KERNEL_CHECK(cudaMemcpy(d_B, h_B, k * n * sizeof(float), cudaMemcpyHostToDevice));
+
+    cublasHandle_t handle;
+    CUBLAS_CALL(cublasCreate(&handle));
+
+    float alpha = 1.0f;
+    float beta = 0.0f;
+
+    /* Logic: C = A * B in Row-Major is equivalent to C^T = B^T * A^T in Col-Major.
+       cuBLAS interprets our Row-Major A(m,k) as a Col-Major A^T(k,m).
+       We pass: handle, transB, transA, n, m, k, alpha, B, ldb, A, lda, beta, C, ldc
+    */
+    CUBLAS_CALL(cublasSgemm(handle, 
+                             CUBLAS_OP_N, CUBLAS_OP_N, 
+                             n, m, k, 
+                             &alpha, 
+                             d_B, n,    // Leading dimension of B is 'n' columns
+                             d_A, k,    // Leading dimension of A is 'k' columns
+                             &beta, 
+                             d_C, n));  // Leading dimension of C is 'n' columns
+
+    CUDA_KERNEL_CHECK(cudaMemcpy(h_C, d_C, m * n * sizeof(float), cudaMemcpyDeviceToHost));
+
+    // Expected Output: [58, 64] [139, 154]
+    std::cout << "Result C (Row-Major):" << std::endl;
+    for (int i = 0; i < m; i++) {
+        for (int j = 0; j < n; j++) {
+            std::cout << h_C[i * n + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+
+    cublasDestroy(handle);
+    cudaFree(d_A); cudaFree(d_B); cudaFree(d_C);
+    return 0;
+}
+#endif
+
+#if 0
 int main() {
     int device = 0;
     int kb_per_block = 64;
@@ -441,4 +593,60 @@ int main() {
     cudaFree(d_out);
     return 0;
 }
+#endif
 
+int main() {
+    const int num_streams = 4;
+    cudaStream_t streams[num_streams];
+    cublasHandle_t handles[num_streams];
+    cudaEvent_t sync_events[num_streams]; // Event Pool
+    cudaEvent_t start, stop;
+
+    // Initialization
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    for (int i = 0; i < num_streams; i++) {
+        cudaStreamCreate(&streams[i]);
+        cublasCreate(&handles[i]);
+        cublasSetStream(handles[i], streams[i]);
+        cudaEventCreate(&sync_events[i]);
+    }
+
+    // 1. Record start on the default stream
+    cudaEventRecord(start, 0);
+
+    // 2. Launch asynchronous work across streams
+    for (int i = 0; i < num_streams; i++) {
+        // [Insert H2D and cublasSgemm calls here as per previous logic]
+        
+        // Record an event in this specific stream's queue after its work
+        cudaEventRecord(sync_events[i], streams[i]);
+    }
+
+    // 3. The Join Point: Make the NULL stream wait for ALL worker streams
+    for (int i = 0; i < num_streams; i++) {
+        // GPU-side wait: Stream 0 stays idle until sync_events[i] is reached
+        cudaStreamWaitEvent(0, sync_events[i], 0);
+    }
+
+    // 4. Record stop on the NULL stream (now guaranteed to be the last thing)
+    cudaEventRecord(stop, 0);
+
+    // 5. CPU Synchronize
+    cudaEventSynchronize(stop);
+
+    float ms = 0;
+    cudaEventElapsedTime(&ms, start, stop);
+    std::cout << "Total Multi-Stream Time: " << ms << " ms" << std::endl;
+
+    // Cleanup
+    for (int i = 0; i < num_streams; i++) {
+        cudaStreamDestroy(streams[i]);
+        cublasDestroy(handles[i]);
+        cudaEventDestroy(sync_events[i]);
+    }
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    return 0;
+}

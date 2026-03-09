@@ -2,8 +2,9 @@
 #include <stdio.h>
 #include <iostream>
 #include <cublas_v2.h>
+#include <iomanip>
+#include <cuda_profiler_api.h>
 
-//#include <cuda_runtime_api.h>
 
 // #ifdef __cplusplus
 //   extern "C" {
