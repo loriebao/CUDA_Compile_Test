@@ -9,14 +9,24 @@ set(CMAKE_CUDA_ARCHITECTURES 86)
 
 project(HelloWorld LANGUAGES CXX CUDA)
 
-add_executable(cuda_app HelloWorld.cu)
+add_executable(cuda_cuBlasEx cuBlasEx.cu)
+add_executable(cuda_MultiThreadEx CUDA_MultiThread.cu)
 
 find_package(CUDAToolkit REQUIRED)
 
-target_link_libraries(cuda_app 
+target_link_libraries(cuda_cuBlasEx
     PRIVATE 
     CUDA::cudart 
     CUDA::cublas   # This resolves the cublasCreate_v2 symbol
+)
+
+find_package(Threads REQUIRED)
+
+target_link_libraries(cuda_MultiThreadEx
+    PRIVATE 
+    CUDA::cudart 
+    CUDA::cublas
+    Threads::Threads
 )
 
 # set(CMAKE_FIND_LIBRARY_PREFIXES "lib")
